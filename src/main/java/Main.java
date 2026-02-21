@@ -1,19 +1,25 @@
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.core.JsonValue;
+import com.openai.models.FunctionDefinition;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
+import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionTool;
-//import com.openai.models.chat.completions.FunctionDefinition;
-import com.openai.models.FunctionDefinition;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static com.openai.core.ObjectMappers.jsonMapper;
+
 public class Main {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         String prompt = null;
         for (int i = 0; i < args.length; i++) {
             if ("-p".equals(args[i]) && i + 1 < args.length) {
@@ -57,7 +63,7 @@ public class Main {
         // ---------------------------------------------------------------
 
         ChatCompletionTool readTool = ChatCompletionTool.builder()
-                .type(JsonValue.from("function")) // tool type is "function" [web:37]
+                .type(JsonValue.from("function"))
                 .function(
                         FunctionDefinition.builder()
                                 .name("Read")
@@ -70,7 +76,7 @@ public class Main {
         ChatCompletion response = client.chat().completions().create(
                 ChatCompletionCreateParams.builder()
                         .model("anthropic/claude-haiku-4.5")
-                        .addTool(readTool) // advertises tool via request "tools" [web:10]
+                        .addTool(readTool)
                         .addUserMessage(prompt)
                         .build()
         );
@@ -79,7 +85,43 @@ public class Main {
             throw new RuntimeException("no choices in response");
         }
 
+        ChatCompletionMessage msg = response.choices().get(0).message();
+
         System.err.println("Logs from your program will appear here!");
-        System.out.print(response.choices().get(0).message().content().orElse(""));
+
+        // NEW: If tool_calls exists, execute ONLY the first tool call (this stage requirement)
+        if (msg.toolCalls().isPresent() && !msg.toolCalls().get().isEmpty()) {
+            Object firstToolCall = msg.toolCalls().get().get(0);
+
+            // Convert to JSON so we can access: function.name and function.arguments
+            JsonNode toolCallNode = jsonMapper().valueToTree(firstToolCall);
+
+            String toolName = toolCallNode.path("function").path("name").asText(null);
+            String argsJson = toolCallNode.path("function").path("arguments").asText(null);
+
+            if (toolName == null) throw new RuntimeException("tool call missing function.name");
+            if (argsJson == null) throw new RuntimeException("tool call missing function.arguments");
+
+            if ("Read".equals(toolName)) {
+                JsonNode argsNode = jsonMapper().readTree(argsJson);
+                JsonNode filePathNode = argsNode.get("file_path");
+                if (filePathNode == null || filePathNode.isNull()) {
+                    throw new RuntimeException("Read tool call missing file_path");
+                }
+
+                String filePath = filePathNode.asText();
+                byte[] bytes = Files.readAllBytes(Paths.get(filePath));
+
+                // IMPORTANT: write raw bytes, no extra newline/formatting
+                System.out.write(bytes);
+                System.out.flush();
+                return;
+            }
+
+            throw new RuntimeException("unsupported tool: " + toolName);
+        }
+
+        // Previous behavior: no tool calls => print content
+        System.out.print(msg.content().orElse(""));
     }
 }
