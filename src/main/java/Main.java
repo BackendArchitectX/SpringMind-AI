@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -41,20 +42,22 @@ public class Main {
                 .baseUrl(baseUrl)
                 .build();
 
-        // Java 8-safe JSON schema
-        Map<String, Object> filePathSchema = new HashMap<String, Object>();
-        filePathSchema.put("type", "string");
-        filePathSchema.put("description", "The path to the file to read");
+        // --------------------------
+        // Read tool schema (Java 8-safe)
+        // --------------------------
+        Map<String, Object> readFilePathSchema = new HashMap<String, Object>();
+        readFilePathSchema.put("type", "string");
+        readFilePathSchema.put("description", "The path to the file to read");
 
-        Map<String, Object> properties = new HashMap<String, Object>();
-        properties.put("file_path", filePathSchema);
+        Map<String, Object> readProperties = new HashMap<String, Object>();
+        readProperties.put("file_path", readFilePathSchema);
 
-        List<String> required = Arrays.asList("file_path");
+        List<String> readRequired = Arrays.asList("file_path");
 
-        Map<String, Object> parameters = new HashMap<String, Object>();
-        parameters.put("type", "object");
-        parameters.put("properties", properties);
-        parameters.put("required", required);
+        Map<String, Object> readParameters = new HashMap<String, Object>();
+        readParameters.put("type", "object");
+        readParameters.put("properties", readProperties);
+        readParameters.put("required", readRequired);
 
         ChatCompletionTool readTool = ChatCompletionTool.builder()
                 .type(JsonValue.from("function"))
@@ -62,7 +65,40 @@ public class Main {
                         FunctionDefinition.builder()
                                 .name("Read")
                                 .description("Read and return the contents of a file")
-                                .parameters(JsonValue.from(parameters))
+                                .parameters(JsonValue.from(readParameters))
+                                .build()
+                )
+                .build();
+
+        // --------------------------
+        // Write tool schema (Java 8-safe)
+        // --------------------------
+        Map<String, Object> writeFilePathSchema = new HashMap<String, Object>();
+        writeFilePathSchema.put("type", "string");
+        writeFilePathSchema.put("description", "The path of the file to write to");
+
+        Map<String, Object> writeContentSchema = new HashMap<String, Object>();
+        writeContentSchema.put("type", "string");
+        writeContentSchema.put("description", "The content to write to the file");
+
+        Map<String, Object> writeProperties = new HashMap<String, Object>();
+        writeProperties.put("file_path", writeFilePathSchema);
+        writeProperties.put("content", writeContentSchema);
+
+        List<String> writeRequired = Arrays.asList("file_path", "content");
+
+        Map<String, Object> writeParameters = new HashMap<String, Object>();
+        writeParameters.put("type", "object");
+        writeParameters.put("properties", writeProperties);
+        writeParameters.put("required", writeRequired);
+
+        ChatCompletionTool writeTool = ChatCompletionTool.builder()
+                .type(JsonValue.from("function"))
+                .function(
+                        FunctionDefinition.builder()
+                                .name("Write")
+                                .description("Write content to a file")
+                                .parameters(JsonValue.from(writeParameters))
                                 .build()
                 )
                 .build();
@@ -71,6 +107,7 @@ public class Main {
         ChatCompletionCreateParams.Builder convo = ChatCompletionCreateParams.builder()
                 .model("anthropic/claude-haiku-4.5")
                 .addTool(readTool)
+                .addTool(writeTool)
                 .addUserMessage(prompt);
 
         System.err.println("Logs from your program will appear here!");
@@ -86,7 +123,7 @@ public class Main {
             // Always append assistant message
             convo.addMessage(msg);
 
-            // If there are tool calls, run them and append tool results; DO NOT print/exit yet. [web:133]
+            // If there are tool calls, run them and append tool results; DO NOT print/exit yet.
             if (msg.toolCalls().isPresent() && !msg.toolCalls().get().isEmpty()) {
                 for (Object toolCallObj : msg.toolCalls().get()) {
                     JsonNode toolCallNode = jsonMapper().valueToTree(toolCallObj);
@@ -99,22 +136,52 @@ public class Main {
                     if (toolName == null) throw new RuntimeException("tool call missing function.name");
                     if (argsJson == null) throw new RuntimeException("tool call missing function.arguments");
 
-                    if (!"Read".equals(toolName)) throw new RuntimeException("unsupported tool: " + toolName);
-
                     JsonNode argsNode = jsonMapper().readTree(argsJson);
-                    JsonNode filePathNode = argsNode.get("file_path");
-                    if (filePathNode == null || filePathNode.isNull()) {
-                        throw new RuntimeException("Read tool call missing file_path");
+
+                    if ("Read".equals(toolName)) {
+                        JsonNode filePathNode = argsNode.get("file_path");
+                        if (filePathNode == null || filePathNode.isNull()) {
+                            throw new RuntimeException("Read tool call missing file_path");
+                        }
+
+                        String filePath = filePathNode.asText();
+                        byte[] bytes = Files.readAllBytes(Paths.get(filePath));
+                        .content("OK")
+
+                                .build());
+
+                    } else if ("Write".equals(toolName)) {
+                        JsonNode filePathNode = argsNode.get("file_path");
+                        JsonNode contentNode = argsNode.get("content");
+                        if (filePathNode == null || filePathNode.isNull()) {
+                            throw new RuntimeException("Write tool call missing file_path");
+                        }
+                        if (contentNode == null || contentNode.isNull()) {
+                            throw new RuntimeException("Write tool call missing content");
+                        }
+
+                        String filePath = filePathNode.asText();
+                        String content = contentNode.asText();
+
+                        Path path = Paths.get(filePath);
+                        Path parent = path.getParent();
+                        if (parent != null) {
+                            Files.createDirectories(parent);
+                        }
+
+                        // Overwrites if exists, creates if missing (default behavior of Files.write)
+                        Files.write(path, content.getBytes(StandardCharsets.UTF_8));
+
+                        String toolResult = "WROTE " + content.getBytes(StandardCharsets.UTF_8).length + " bytes to " + filePath;
+
+                        convo.addMessage(ChatCompletionToolMessageParam.builder()
+                                .toolCallId(toolCallId)
+                                .content(toolResult)
+                                .build());
+
+                    } else {
+                        throw new RuntimeException("unsupported tool: " + toolName);
                     }
-
-                    String filePath = filePathNode.asText();
-                    byte[] bytes = Files.readAllBytes(Paths.get(filePath));
-                    String toolResult = new String(bytes, StandardCharsets.UTF_8);
-
-                    convo.addMessage(ChatCompletionToolMessageParam.builder()
-                            .toolCallId(toolCallId)
-                            .content(toolResult)
-                            .build());
                 }
                 continue; // ask the model again with tool outputs in the conversation
             }
