@@ -4,7 +4,8 @@ import com.openai.core.JsonValue;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionTool;
-import com.openai.models.chat.completions.FunctionDefinition;
+//import com.openai.models.chat.completions.FunctionDefinition;
+import com.openai.models.FunctionDefinition;
 
 import java.util.Arrays;
 import java.util.HashMap;
