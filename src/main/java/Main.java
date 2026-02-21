@@ -6,9 +6,10 @@ import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionTool;
-
+import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Arrays;
@@ -26,27 +27,21 @@ public class Main {
                 prompt = args[i + 1];
             }
         }
-
         if (prompt == null || prompt.isEmpty()) {
             throw new RuntimeException("error: -p flag is required");
         }
 
         String apiKey = System.getenv("OPENROUTER_API_KEY");
         String baseUrl = System.getenv("OPENROUTER_BASE_URL");
-        if (baseUrl == null || baseUrl.isEmpty()) {
-            baseUrl = "https://openrouter.ai/api/v1";
-        }
-
-        if (apiKey == null || apiKey.isEmpty()) {
-            throw new RuntimeException("OPENROUTER_API_KEY is not set");
-        }
+        if (baseUrl == null || baseUrl.isEmpty()) baseUrl = "https://openrouter.ai/api/v1";
+        if (apiKey == null || apiKey.isEmpty()) throw new RuntimeException("OPENROUTER_API_KEY is not set");
 
         OpenAIClient client = OpenAIOkHttpClient.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl)
                 .build();
 
-        // ---- Java 8-safe JSON schema construction (no Map.of/List.of) ----
+        // Java 8-safe JSON schema
         Map<String, Object> filePathSchema = new HashMap<String, Object>();
         filePathSchema.put("type", "string");
         filePathSchema.put("description", "The path to the file to read");
@@ -60,7 +55,6 @@ public class Main {
         parameters.put("type", "object");
         parameters.put("properties", properties);
         parameters.put("required", required);
-        // ---------------------------------------------------------------
 
         ChatCompletionTool readTool = ChatCompletionTool.builder()
                 .type(JsonValue.from("function"))
@@ -73,55 +67,64 @@ public class Main {
                 )
                 .build();
 
-        ChatCompletion response = client.chat().completions().create(
-                ChatCompletionCreateParams.builder()
-                        .model("anthropic/claude-haiku-4.5")
-                        .addTool(readTool)
-                        .addUserMessage(prompt)
-                        .build()
-        );
-
-        if (response.choices().isEmpty()) {
-            throw new RuntimeException("no choices in response");
-        }
-
-        ChatCompletionMessage msg = response.choices().get(0).message();
+        // Persist conversation across iterations
+        ChatCompletionCreateParams.Builder convo = ChatCompletionCreateParams.builder()
+                .model("anthropic/claude-haiku-4.5")
+                .addTool(readTool)
+                .addUserMessage(prompt);
 
         System.err.println("Logs from your program will appear here!");
 
-        // NEW: If tool_calls exists, execute ONLY the first tool call (this stage requirement)
-        if (msg.toolCalls().isPresent() && !msg.toolCalls().get().isEmpty()) {
-            Object firstToolCall = msg.toolCalls().get().get(0);
+        final int MAX_ITERS = 25;
 
-            // Convert to JSON so we can access: function.name and function.arguments
-            JsonNode toolCallNode = jsonMapper().valueToTree(firstToolCall);
+        for (int iter = 0; iter < MAX_ITERS; iter++) {
+            ChatCompletion response = client.chat().completions().create(convo.build());
+            if (response.choices().isEmpty()) throw new RuntimeException("no choices in response");
 
-            String toolName = toolCallNode.path("function").path("name").asText(null);
-            String argsJson = toolCallNode.path("function").path("arguments").asText(null);
+            ChatCompletionMessage msg = response.choices().get(0).message();
 
-            if (toolName == null) throw new RuntimeException("tool call missing function.name");
-            if (argsJson == null) throw new RuntimeException("tool call missing function.arguments");
+            // Always append assistant message
+            convo.addMessage(msg);
 
-            if ("Read".equals(toolName)) {
-                JsonNode argsNode = jsonMapper().readTree(argsJson);
-                JsonNode filePathNode = argsNode.get("file_path");
-                if (filePathNode == null || filePathNode.isNull()) {
-                    throw new RuntimeException("Read tool call missing file_path");
+            // If there are tool calls, run them and append tool results; DO NOT print/exit yet. [web:133]
+            if (msg.toolCalls().isPresent() && !msg.toolCalls().get().isEmpty()) {
+                for (Object toolCallObj : msg.toolCalls().get()) {
+                    JsonNode toolCallNode = jsonMapper().valueToTree(toolCallObj);
+
+                    String toolCallId = toolCallNode.path("id").asText(null);
+                    String toolName = toolCallNode.path("function").path("name").asText(null);
+                    String argsJson = toolCallNode.path("function").path("arguments").asText(null);
+
+                    if (toolCallId == null) throw new RuntimeException("tool call missing id");
+                    if (toolName == null) throw new RuntimeException("tool call missing function.name");
+                    if (argsJson == null) throw new RuntimeException("tool call missing function.arguments");
+
+                    if (!"Read".equals(toolName)) throw new RuntimeException("unsupported tool: " + toolName);
+
+                    JsonNode argsNode = jsonMapper().readTree(argsJson);
+                    JsonNode filePathNode = argsNode.get("file_path");
+                    if (filePathNode == null || filePathNode.isNull()) {
+                        throw new RuntimeException("Read tool call missing file_path");
+                    }
+
+                    String filePath = filePathNode.asText();
+                    byte[] bytes = Files.readAllBytes(Paths.get(filePath));
+                    String toolResult = new String(bytes, StandardCharsets.UTF_8);
+
+                    convo.addMessage(ChatCompletionToolMessageParam.builder()
+                            .toolCallId(toolCallId)
+                            .content(toolResult)
+                            .build());
                 }
-
-                String filePath = filePathNode.asText();
-                byte[] bytes = Files.readAllBytes(Paths.get(filePath));
-
-                // IMPORTANT: write raw bytes, no extra newline/formatting
-                System.out.write(bytes);
-                System.out.flush();
-                return;
+                continue; // ask the model again with tool outputs in the conversation
             }
 
-            throw new RuntimeException("unsupported tool: " + toolName);
+            // No tool calls => final response: print and exit (previous behavior).
+            System.out.print(msg.content().orElse(""));
+            System.out.flush();
+            return;
         }
 
-        // Previous behavior: no tool calls => print content
-        System.out.print(msg.content().orElse(""));
+        throw new RuntimeException("agent loop exceeded max iterations (" + MAX_ITERS + ")");
     }
 }
