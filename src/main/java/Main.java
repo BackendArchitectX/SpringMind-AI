@@ -9,6 +9,9 @@ import com.openai.models.chat.completions.ChatCompletionTool;
 import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -103,11 +106,40 @@ public class Main {
                 )
                 .build();
 
+        // --------------------------
+        // Bash tool schema (Java 8-safe)
+        // --------------------------
+        Map<String, Object> bashCommandSchema = new HashMap<String, Object>();
+        bashCommandSchema.put("type", "string");
+        bashCommandSchema.put("description", "The command to execute");
+
+        Map<String, Object> bashProperties = new HashMap<String, Object>();
+        bashProperties.put("command", bashCommandSchema);
+
+        List<String> bashRequired = Arrays.asList("command");
+
+        Map<String, Object> bashParameters = new HashMap<String, Object>();
+        bashParameters.put("type", "object");
+        bashParameters.put("properties", bashProperties);
+        bashParameters.put("required", bashRequired);
+
+        ChatCompletionTool bashTool = ChatCompletionTool.builder()
+                .type(JsonValue.from("function"))
+                .function(
+                        FunctionDefinition.builder()
+                                .name("Bash")
+                                .description("Execute a shell command")
+                                .parameters(JsonValue.from(bashParameters))
+                                .build()
+                )
+                .build();
+
         // Persist conversation across iterations
         ChatCompletionCreateParams.Builder convo = ChatCompletionCreateParams.builder()
                 .model("anthropic/claude-haiku-4.5")
                 .addTool(readTool)
                 .addTool(writeTool)
+                .addTool(bashTool)
                 .addUserMessage(prompt);
 
         System.err.println("Logs from your program will appear here!");
@@ -180,8 +212,44 @@ public class Main {
                                 .content("OK")
                                 .build());
 
+                    } else if ("Bash".equals(toolName)) {
+                        JsonNode commandNode = argsNode.get("command");
+                        if (commandNode == null || commandNode.isNull()) {
+                            throw new RuntimeException("Bash tool call missing command");
+                        }
 
-                    } else {
+                        String command = commandNode.asText();
+
+                        File workDir = new File(System.getProperty("user.dir"));
+
+                        ProcessBuilder pb = new ProcessBuilder("bash", "-lc", command);
+                        pb.directory(workDir);
+                        pb.redirectErrorStream(true); // merge stderr into stdout
+
+                        Process p = pb.start();
+
+                        StringBuilder output = new StringBuilder();
+                        BufferedReader reader = new BufferedReader(
+                                new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)
+                        );
+
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            output.append(line).append("\n");
+                        }
+
+                        int exitCode = p.waitFor();
+
+                        String toolResult = (exitCode == 0)
+                                ? output.toString()
+                                : ("ERROR: exit code " + exitCode + "\n" + output.toString());
+
+                        convo.addMessage(ChatCompletionToolMessageParam.builder()
+                                .toolCallId(toolCallId)
+                                .content(toolResult)
+                                .build());
+                    }
+                    else {
                         throw new RuntimeException("unsupported tool: " + toolName);
                     }
                 }
