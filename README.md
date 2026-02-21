@@ -1,4 +1,3 @@
-```markdown
 # SpringMind AI
 
 [![Java](https://img.shields.io/badge/Java-8%2B-blue.svg)]()
@@ -256,6 +255,7 @@ Built with Java, Maven, and LLM integrations. Inspired by modern agent-based dev
 SpringMind AI — Think → Act → Observe → Repeat
 
 ```
+
 If you want, I can now:
 
 - Generate the full `Apache-2.0` `LICENSE` text and place it alongside the MIT file.
