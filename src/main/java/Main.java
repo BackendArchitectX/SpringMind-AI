@@ -146,8 +146,11 @@ public class Main {
 
                         String filePath = filePathNode.asText();
                         byte[] bytes = Files.readAllBytes(Paths.get(filePath));
-                        .content("OK")
+                        String toolResult = new String(bytes, StandardCharsets.UTF_8);
 
+                        convo.addMessage(ChatCompletionToolMessageParam.builder()
+                                .toolCallId(toolCallId)
+                                .content(toolResult)
                                 .build());
 
                     } else if ("Write".equals(toolName)) {
@@ -172,12 +175,11 @@ public class Main {
                         // Overwrites if exists, creates if missing (default behavior of Files.write)
                         Files.write(path, content.getBytes(StandardCharsets.UTF_8));
 
-                        String toolResult = "WROTE " + content.getBytes(StandardCharsets.UTF_8).length + " bytes to " + filePath;
-
                         convo.addMessage(ChatCompletionToolMessageParam.builder()
                                 .toolCallId(toolCallId)
-                                .content(toolResult)
+                                .content("OK")
                                 .build());
+
 
                     } else {
                         throw new RuntimeException("unsupported tool: " + toolName);
