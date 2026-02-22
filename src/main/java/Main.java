@@ -8,6 +8,9 @@ import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionTool;
 import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.openai.models.FunctionParameters;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -68,10 +71,17 @@ public class Main {
                         FunctionDefinition.builder()
                                 .name("Read")
                                 .description("Read and return the contents of a file")
-                                .parameters(JsonValue.from(readParameters))
+                                .parameters(
+                                        FunctionParameters.builder()
+                                                .putAdditionalProperty("type", JsonValue.from("object"))
+                                                .putAdditionalProperty("properties", JsonValue.from(readProperties))
+                                                .putAdditionalProperty("required", JsonValue.from(readRequired))
+                                                .build()
+                                )
                                 .build()
                 )
                 .build();
+
 
         // --------------------------
         // Write tool schema (Java 8-safe)
@@ -95,16 +105,25 @@ public class Main {
         writeParameters.put("properties", writeProperties);
         writeParameters.put("required", writeRequired);
 
+
         ChatCompletionTool writeTool = ChatCompletionTool.builder()
                 .type(JsonValue.from("function"))
                 .function(
                         FunctionDefinition.builder()
                                 .name("Write")
                                 .description("Write content to a file")
-                                .parameters(JsonValue.from(writeParameters))
+                                .parameters(
+                                        FunctionParameters.builder()
+                                                .putAdditionalProperty("type", JsonValue.from("object"))
+                                                .putAdditionalProperty("properties", JsonValue.from(writeProperties))
+                                                .putAdditionalProperty("required", JsonValue.from(writeRequired))
+                                                .build()
+                                )
                                 .build()
                 )
                 .build();
+
+
 
         // --------------------------
         // Bash tool schema (Java 8-safe)
@@ -129,18 +148,31 @@ public class Main {
                         FunctionDefinition.builder()
                                 .name("Bash")
                                 .description("Execute a shell command")
-                                .parameters(JsonValue.from(bashParameters))
+                                .parameters(
+                                        FunctionParameters.builder()
+                                                .putAdditionalProperty("type", JsonValue.from("object"))
+                                                .putAdditionalProperty("properties", JsonValue.from(bashProperties))
+                                                .putAdditionalProperty("required", JsonValue.from(bashRequired))
+                                                .build()
+                                )
                                 .build()
                 )
                 .build();
 
+
         // Persist conversation across iterations
+        String nowIst = ZonedDateTime.now(ZoneId.of("Asia/Kolkata")).toString();
+
         ChatCompletionCreateParams.Builder convo = ChatCompletionCreateParams.builder()
                 .model("anthropic/claude-haiku-4.5")
+                .maxCompletionTokens(1024L)
+                .addSystemMessage("Current datetime (Asia/Kolkata): " + nowIst +
+                        ". If asked for today's date/time, use this value.")
                 .addTool(readTool)
                 .addTool(writeTool)
                 .addTool(bashTool)
                 .addUserMessage(prompt);
+
 
         System.err.println("Logs from your program will appear here!");
 
@@ -157,7 +189,12 @@ public class Main {
 
             // If there are tool calls, run them and append tool results; DO NOT print/exit yet.
             if (msg.toolCalls().isPresent() && !msg.toolCalls().get().isEmpty()) {
-                for (Object toolCallObj : msg.toolCalls().get()) {
+
+                List toolCalls = msg.toolCalls().get(); // intentionally raw to avoid unchecked foreach warning
+
+                for (int i = 0; i < toolCalls.size(); i++) {
+                    Object toolCallObj = toolCalls.get(i);
+
                     JsonNode toolCallNode = jsonMapper().valueToTree(toolCallObj);
 
                     String toolCallId = toolCallNode.path("id").asText(null);
@@ -170,6 +207,7 @@ public class Main {
 
                     JsonNode argsNode = jsonMapper().readTree(argsJson);
 
+                    // --- keep your Read / Write / Bash branches exactly as-is ---
                     if ("Read".equals(toolName)) {
                         JsonNode filePathNode = argsNode.get("file_path");
                         if (filePathNode == null || filePathNode.isNull()) {
@@ -204,7 +242,6 @@ public class Main {
                             Files.createDirectories(parent);
                         }
 
-                        // Overwrites if exists, creates if missing (default behavior of Files.write)
                         Files.write(path, content.getBytes(StandardCharsets.UTF_8));
 
                         convo.addMessage(ChatCompletionToolMessageParam.builder()
@@ -224,7 +261,7 @@ public class Main {
 
                         ProcessBuilder pb = new ProcessBuilder("bash", "-lc", command);
                         pb.directory(workDir);
-                        pb.redirectErrorStream(true); // merge stderr into stdout
+                        pb.redirectErrorStream(true);
 
                         Process p = pb.start();
 
@@ -242,19 +279,20 @@ public class Main {
 
                         String toolResult = (exitCode == 0)
                                 ? output.toString()
-                                : ("ERROR: exit code " + exitCode + "\n" + output.toString());
+                                : ("ERROR: exit code " + exitCode + "\n" + output);
 
                         convo.addMessage(ChatCompletionToolMessageParam.builder()
                                 .toolCallId(toolCallId)
                                 .content(toolResult)
                                 .build());
-                    }
-                    else {
+                    } else {
                         throw new RuntimeException("unsupported tool: " + toolName);
                     }
                 }
-                continue; // ask the model again with tool outputs in the conversation
+
+                continue;
             }
+
 
             // No tool calls => final response: print and exit (previous behavior).
             System.out.print(msg.content().orElse(""));
